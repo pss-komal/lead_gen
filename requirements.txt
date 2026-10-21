@@ -8,3 +8,19 @@ python-multipart
 python-dotenv
 google-search-results
 email-validator
+requests
+
+# Innovation features (all free)
+beautifulsoup4      # Website scraper / email finder
+lxml                # HTML parser for BeautifulSoup
+reportlab           # PDF report generator
+
+# No extra packages needed for:
+# - Gemini AI    → uses 'requests' (direct REST API)
+# - Telegram Bot → uses 'requests' (Telegram Bot API)
+# - Slack        → uses 'requests' (Incoming Webhooks)
+# - Discord      → uses 'requests' (Webhooks)
+# - Gmail SMTP   → uses 'smtplib' (Python built-in)
+# - Razorpay     → uses 'requests' (direct REST API)
+# - WhatsApp     → uses 'requests' (Meta Graph API)
+# - Google Maps  → uses 'requests' (Places API v1)
