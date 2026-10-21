@@ -1,3 +1,4 @@
+import os
 import logging
 from datetime import datetime
 
@@ -12,6 +13,7 @@ from .database import Base, engine, get_db
 from .models   import User, Lead as LeadModel
 from .schemas  import (
     UserCreate, Token, ContextCreate,
+    LeadSearchRequest, LeadQualifySingleRequest, LeadQualifyBatchRequest,
     LeadSave, LeadStatusUpdate, LeadNoteUpdate,
     AIOutreachRequest, AIAnalyzeRequest, AIBatchAnalyzeRequest,
     ScrapeRequest, EnrichLeadRequest,
@@ -22,7 +24,8 @@ from .schemas  import (
     WhatsAppTextMessage, WhatsAppTemplateMessage, WhatsAppLeadNotify,
     EmailSend, EmailLeadNotify,
 )
-from .auth import hash_password, verify_password, create_access_token, get_current_user
+from .auth import hash_password, verify_password, create_access_token, get_current_user, get_optional_current_user
+from .scoring import DEFAULT_CRITERIA, score_lead, qualify_lead
 
 # --- Services ---
 from .serp_service        import search_serpapi
@@ -109,22 +112,136 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 # LEAD SEARCH ENGINES
 # ===========================================================================
 
+# ===========================================================================
+# LEAD SEARCH & GENERIC QUALIFICATION ENGINES
+# ===========================================================================
+
+@app.post("/leads/search", tags=["Lead Qualification & Search"])
+def search_and_qualify_leads(
+    payload: LeadSearchRequest,
+    current_user: User = Depends(get_optional_current_user),
+):
+    """
+    Search and qualify leads using the generic scoring engine.
+    Accepts request payload:
+    {
+      "product_or_service": "Lenovo laptops",
+      "industry": "IT hardware",
+      "target_customer_types": ["distributor", "wholesaler", "retailer", "corporate buyer"],
+      "location": "Mumbai, India",
+      "customer_goal": "Sell products",
+      "search_preferences": {
+        "include_related_businesses": true,
+        "require_verified_contact": false,
+        "deduplicate": true
+      },
+      "limit": 10
+    }
+    """
+    product = payload.get_product()
+    location = payload.get_location()
+    description = payload.get_description()
+    limit = payload.limit or 10
+    context = payload.to_context_dict()
+
+    res = None
+    if os.getenv("GOOGLE_MAPS_API_KEY"):
+        try:
+            res = search_google_maps(product, location, description, limit, context, payload.criteria)
+        except Exception as exc:
+            logger.warning("Google Places API error: %s — falling back to SerpAPI", exc)
+
+    if (not res or not res.get("leads")) and os.getenv("SERPAPI_API_KEY"):
+        res = search_serpapi(product, location, description, limit, context, payload.criteria)
+
+    if (not res or not res.get("leads")) and os.getenv("APIFY_API_TOKEN"):
+        res = search_apify(product, location, description, limit)
+
+    return res or {
+        "product_name": product,
+        "region": location,
+        "description": description,
+        "total_leads_found": 0,
+        "leads": [],
+        "score_summary": {"max": 0, "min": 0, "avg": 0},
+    }
+
+
+@app.post("/leads/qualify", tags=["Lead Qualification & Search"])
+def qualify_single_lead_endpoint(
+    payload: LeadQualifySingleRequest,
+    current_user: User = Depends(get_optional_current_user),
+):
+    """
+    Qualify a single business lead and return structured evidence, missing information,
+    purchase intent, and recommended action.
+    """
+    context = payload.context.to_context_dict() if payload.context else {}
+    return qualify_lead(payload.lead, context, payload.criteria)
+
+
+@app.post("/leads/qualify/batch", tags=["Lead Qualification & Search"])
+def qualify_batch_leads_endpoint(
+    payload: LeadQualifyBatchRequest,
+    current_user: User = Depends(get_optional_current_user),
+):
+    """
+    Qualify a batch of business leads using the generic scoring engine.
+    """
+    context = payload.context.to_context_dict() if payload.context else {}
+    results = [qualify_lead(lead, context, payload.criteria) for lead in payload.leads]
+    return {
+        "total_leads": len(results),
+        "leads": results,
+    }
+
+
+@app.get("/leads/criteria", tags=["Lead Qualification & Search"])
+def get_scoring_criteria():
+    """
+    View the active generic lead qualification criteria and factor weights.
+    """
+    return {
+        "criteria": DEFAULT_CRITERIA,
+        "description": "Configurable weights for generic lead scoring engine (0-100 scale).",
+    }
+
+
 @app.post("/context/create", tags=["Lead Search — SerpAPI"])
-def create_context(payload: ContextCreate, current_user: User = Depends(get_current_user)):
-    """Search leads via SerpAPI Google Maps (middleman)."""
-    return search_serpapi(payload.product_name, payload.region, payload.description, payload.limit)
+def create_context(payload: ContextCreate, current_user: User = Depends(get_optional_current_user)):
+    """Search leads via SerpAPI Google Maps with qualification."""
+    return search_serpapi(
+        payload.get_product(),
+        payload.get_location(),
+        payload.get_description(),
+        payload.limit or 10,
+        payload.to_context_dict(),
+        payload.criteria,
+    )
 
 
 @app.post("/apify/search", tags=["Lead Search — Apify"])
-def apify_search(payload: ContextCreate, current_user: User = Depends(get_current_user)):
+def apify_search(payload: ContextCreate, current_user: User = Depends(get_optional_current_user)):
     """Search leads via Apify Google Maps Scraper (middleman)."""
-    return search_apify(payload.product_name, payload.region, payload.description, payload.limit)
+    return search_apify(
+        payload.get_product(),
+        payload.get_location(),
+        payload.get_description(),
+        payload.limit or 10,
+    )
 
 
 @app.post("/google/search", tags=["Lead Search — Google Direct"])
-def google_search(payload: ContextCreate, current_user: User = Depends(get_current_user)):
-    """Search leads directly via Google Places API (no middleman). Requires GOOGLE_MAPS_API_KEY."""
-    return search_google_maps(payload.product_name, payload.region, payload.description, payload.limit)
+def google_search(payload: ContextCreate, current_user: User = Depends(get_optional_current_user)):
+    """Search leads directly via Google Places API (no middleman) with generic scoring & evidence."""
+    return search_google_maps(
+        payload.get_product(),
+        payload.get_location(),
+        payload.get_description(),
+        payload.limit or 10,
+        payload.to_context_dict(),
+        payload.criteria,
+    )
 
 
 # ===========================================================================

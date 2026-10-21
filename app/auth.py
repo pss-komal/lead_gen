@@ -68,3 +68,26 @@ def get_current_user(
         raise credentials_exception
 
     return user
+
+
+optional_bearer_scheme = HTTPBearer(
+    bearerFormat="JWT",
+    scheme_name="Optional JWT Auth",
+    auto_error=False,
+)
+
+
+def get_optional_current_user(
+    credentials: HTTPAuthorizationCredentials = Depends(optional_bearer_scheme),
+    db: Session = Depends(get_db),
+):
+    if not credentials:
+        return None
+    try:
+        payload = jwt.decode(credentials.credentials, SECRET_KEY, algorithms=[ALGORITHM])
+        email = payload.get("sub")
+        if not email:
+            return None
+        return db.query(User).filter(User.email == email).first()
+    except Exception:
+        return None

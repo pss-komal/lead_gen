@@ -17,14 +17,84 @@ class Token(BaseModel):
 
 
 # ---------------------------------------------------------------------------
-# Lead search schemas  (SerpAPI / Apify / Google Maps Direct)
+# Lead search & qualification schemas
 # ---------------------------------------------------------------------------
 
-class ContextCreate(BaseModel):
-    product_name: str
-    region:       str
-    description:  str
-    limit:        int = 10
+class SearchPreferences(BaseModel):
+    include_related_businesses: Optional[bool] = True
+    require_verified_contact: Optional[bool] = False
+    deduplicate: Optional[bool] = True
+
+
+class LeadSearchRequest(BaseModel):
+    """
+    Request model supporting the generic lead qualification format:
+    {
+      "product_or_service": "Lenovo laptops",
+      "industry": "IT hardware",
+      "target_customer_types": ["distributor", "wholesaler", "retailer", "corporate buyer"],
+      "location": "Mumbai, India",
+      "customer_goal": "Sell products",
+      "search_preferences": {
+        "include_related_businesses": true,
+        "require_verified_contact": false,
+        "deduplicate": true
+      },
+      "limit": 10
+    }
+    """
+    product_or_service:    Optional[str] = None
+    industry:              Optional[str] = None
+    target_customer_types: Optional[List[str]] = [
+        "distributor", "wholesaler", "retailer", "corporate buyer"
+    ]
+    location:              Optional[str] = None
+    customer_goal:         Optional[str] = "Sell products"
+    search_preferences:    Optional[SearchPreferences] = SearchPreferences()
+    limit:                 Optional[int] = 10
+    criteria:              Optional[dict] = None
+
+    # Legacy compatibility fields
+    product_name:          Optional[str] = None
+    region:                Optional[str] = None
+    description:           Optional[str] = None
+
+    def get_product(self) -> str:
+        return self.product_or_service or self.product_name or ""
+
+    def get_location(self) -> str:
+        return self.location or self.region or ""
+
+    def get_description(self) -> str:
+        return self.industry or self.description or ", ".join(self.target_customer_types or [])
+
+    def to_context_dict(self) -> dict:
+        return {
+            "product_or_service": self.get_product(),
+            "industry": self.industry or "",
+            "target_customer_types": self.target_customer_types or [],
+            "location": self.get_location(),
+            "customer_goal": self.customer_goal or "Sell products",
+            "search_preferences": self.search_preferences.dict() if self.search_preferences else {},
+            "limit": self.limit or 10,
+        }
+
+
+# ContextCreate inherits from LeadSearchRequest so existing endpoints accept both formats
+class ContextCreate(LeadSearchRequest):
+    pass
+
+
+class LeadQualifySingleRequest(BaseModel):
+    lead:     dict
+    context:  Optional[LeadSearchRequest] = None
+    criteria: Optional[dict] = None
+
+
+class LeadQualifyBatchRequest(BaseModel):
+    leads:    List[dict]
+    context:  Optional[LeadSearchRequest] = None
+    criteria: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------------

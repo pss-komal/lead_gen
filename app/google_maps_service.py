@@ -12,7 +12,7 @@ import os
 import logging
 import requests
 
-from .scoring import attach_scores, build_scatterplot_data
+from .scoring import attach_scores, build_scatterplot_data, qualify_lead
 
 logger = logging.getLogger("lead_gen.google_maps_service")
 
@@ -39,15 +39,20 @@ FIELD_MASK = ",".join([
 
 
 # ---------------------------------------------------------------------------
-# Query builder — same pattern as SerpAPI / Apify services
+# Query builder — accepts optional context with target_customer_types
 # ---------------------------------------------------------------------------
 
-def build_queries(product_name: str, region: str, description: str) -> list:
-    return [
+def build_queries(product_name: str, region: str, description: str, context: dict = None) -> list:
+    queries = []
+    if context and context.get("target_customer_types"):
+        for ct in context.get("target_customer_types")[:3]:
+            queries.append(f"{product_name} {ct} {region}")
+    queries.extend([
         f"{product_name} buyer OR importer OR wholesaler OR distributor {region}",
         f"{product_name} {description} {region}",
         f"{product_name} trader OR supplier OR dealer {region}",
-    ]
+    ])
+    return queries
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +78,7 @@ def classify_lead(title: str, snippet: str, category: str = "") -> str:
 # Core direct Google Places search function
 # ---------------------------------------------------------------------------
 
-def search_google_maps(product_name: str, region: str, description: str, limit: int):
+def search_google_maps(product_name: str, region: str, description: str, limit: int, context: dict = None, criteria: dict = None):
     """
     Search Google Maps directly using the official Google Places API (New).
 
@@ -81,8 +86,8 @@ def search_google_maps(product_name: str, region: str, description: str, limit: 
       1. Build search queries
       2. POST to https://places.googleapis.com/v1/places:searchText
       3. Extract: name, phone, address, website, lat/lng, category
-      4. Classify + score leads
-      5. Return leads + scatterplot_data
+      4. Qualify and score leads with generic scoring engine
+      5. Return qualified leads with evidence + scatterplot_data
 
     Requires: GOOGLE_MAPS_API_KEY in .env
     """
@@ -94,12 +99,22 @@ def search_google_maps(product_name: str, region: str, description: str, limit: 
     logger.info("  Limit      : %d", limit)
     logger.info("=" * 60)
 
+    context = context or {
+        "product_or_service": product_name,
+        "location": region,
+        "industry": description,
+        "customer_goal": "Sell products",
+    }
+
     api_key = os.getenv("GOOGLE_MAPS_API_KEY")
     if not api_key:
         logger.error("GOOGLE_MAPS_API_KEY is not set in environment variables!")
         return {
             "product_name":      product_name,
+            "product_or_service": context.get("product_or_service", product_name),
             "region":            region,
+            "location":          context.get("location", region),
+            "industry":          context.get("industry", description),
             "description":       description,
             "total_leads_found": 0,
             "leads":             [],
@@ -107,7 +122,7 @@ def search_google_maps(product_name: str, region: str, description: str, limit: 
             "error":             "GOOGLE_MAPS_API_KEY environment variable is not set.",
         }
 
-    queries    = build_queries(product_name, region, description)
+    queries    = build_queries(product_name, region, description, context)
     seen_titles = set()
     all_leads   = []
 
@@ -202,6 +217,7 @@ def search_google_maps(product_name: str, region: str, description: str, limit: 
             all_leads.append({
                 "lead_type":     lead_type,
                 "title":         title,
+                "business_name": title,
                 "link":          link,
                 "phone":         phone,
                 "address":       address,
@@ -226,9 +242,11 @@ def search_google_maps(product_name: str, region: str, description: str, limit: 
     logger.info("GOOGLE PLACES SEARCH COMPLETE — Total: %d leads", len(all_leads))
     logger.info("-" * 60)
 
-    scored_leads  = attach_scores(all_leads, product_name)
-    scatterplot   = build_scatterplot_data(scored_leads, product_name)
-    scores        = [l["score"] for l in scored_leads]
+    qualified_leads = [qualify_lead(l, context, criteria) for l in all_leads]
+    qualified_leads.sort(key=lambda l: l["lead_score"], reverse=True)
+
+    scatterplot   = build_scatterplot_data(qualified_leads, product_name)
+    scores        = [l["lead_score"] for l in qualified_leads]
     score_summary = {
         "max": max(scores) if scores else 0,
         "min": min(scores) if scores else 0,
@@ -237,10 +255,13 @@ def search_google_maps(product_name: str, region: str, description: str, limit: 
 
     return {
         "product_name":      product_name,
+        "product_or_service": context.get("product_or_service", product_name),
         "region":            region,
+        "location":          context.get("location", region),
+        "industry":          context.get("industry", description),
         "description":       description,
-        "total_leads_found": len(scored_leads),
+        "total_leads_found": len(qualified_leads),
         "score_summary":     score_summary,
-        "leads":             scored_leads,
+        "leads":             qualified_leads,
         "scatterplot_data":  scatterplot,
     }

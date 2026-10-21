@@ -2,7 +2,7 @@ import os
 import logging
 from serpapi import GoogleSearch
 
-from .scoring import attach_scores, build_scatterplot_data
+from .scoring import attach_scores, build_scatterplot_data, qualify_lead
 
 # ---------------------------------------------------------------------------
 # Logger setup  —  logs appear on the terminal (uvicorn stdout)
@@ -15,13 +15,18 @@ logging.basicConfig(
 logger = logging.getLogger("lead_gen.serp_service")
 
 
-def build_maps_queries(product_name: str, region: str, description: str) -> list:
+def build_maps_queries(product_name: str, region: str, description: str, context: dict = None) -> list:
     """
     Craft Google Maps search queries to find local businesses that are
     likely buyers / users of the product in the specified region.
     Maps results come with phone, address, and category — ready-made lead data.
     """
-    queries = [
+    queries = []
+    if context and context.get("target_customer_types"):
+        for ct in context.get("target_customer_types")[:3]:
+            queries.append(f"{product_name} {ct} {region}")
+
+    queries.extend([
         # Distributors / wholesalers / importers
         f"{product_name} buyer OR importer OR wholesaler OR distributor {region}",
 
@@ -30,7 +35,7 @@ def build_maps_queries(product_name: str, region: str, description: str) -> list
 
         # Procurement / trading companies
         f"{product_name} trader OR supplier OR dealer {region}",
-    ]
+    ])
     return queries
 
 
@@ -54,7 +59,7 @@ def classify_lead(title: str, snippet: str, category: str = "") -> str:
     return "Potential Lead"
 
 
-def search_serpapi(product_name: str, region: str, description: str, limit: int):
+def search_serpapi(product_name: str, region: str, description: str, limit: int, context: dict = None, criteria: dict = None):
     """
     Search SerpAPI using Google Maps engine to find local businesses that are
     likely buyers of the given product in the specified region.
@@ -62,10 +67,6 @@ def search_serpapi(product_name: str, region: str, description: str, limit: int)
     Google Maps results natively include:
         phone, address, category (type), rating, website
     — which makes them far more lead-ready than generic organic results.
-
-    Each lead in the response includes:
-        lead_type, title, link, phone, address, category, status,
-        snippet (= address text), source, matched_query
     """
     logger.info("=" * 60)
     logger.info("NEW LEAD SEARCH STARTED  [engine: google_maps]")
@@ -75,11 +76,30 @@ def search_serpapi(product_name: str, region: str, description: str, limit: int)
     logger.info("  Limit      : %d", limit)
     logger.info("=" * 60)
 
+    context = context or {
+        "product_or_service": product_name,
+        "location": region,
+        "industry": description,
+        "customer_goal": "Sell products",
+    }
+
     api_key = os.getenv("SERPAPI_API_KEY")
     if not api_key:
         logger.error("SERPAPI_API_KEY is not set in environment variables!")
+        return {
+            "product_name":      product_name,
+            "product_or_service": context.get("product_or_service", product_name),
+            "region":            region,
+            "location":          context.get("location", region),
+            "industry":          context.get("industry", description),
+            "description":       description,
+            "total_leads_found": 0,
+            "leads":             [],
+            "scatterplot_data":  [],
+            "error":             "SERPAPI_API_KEY environment variable is not set.",
+        }
 
-    queries = build_maps_queries(product_name, region, description)
+    queries = build_maps_queries(product_name, region, description, context)
     logger.info("Built %d Maps queries.", len(queries))
 
     seen_titles = set()   # Maps results don't always have unique links; dedupe by name
@@ -140,6 +160,7 @@ def search_serpapi(product_name: str, region: str, description: str, limit: int)
                 {
                     "lead_type":     lead_type,
                     "title":         title,
+                    "business_name": title,
                     "link":          link,
                     "phone":         phone,
                     "address":       address,
@@ -151,10 +172,6 @@ def search_serpapi(product_name: str, region: str, description: str, limit: int)
                 }
             )
             added_this_query += 1
-            logger.debug(
-                "  + Lead [%s] | phone=%s | addr=%s | cat=%s",
-                lead_type, phone, (address or "")[:40], category,
-            )
 
         logger.info(
             "[Query %d/%d] Added %d leads | Skipped %d duplicates | Total so far: %d",
@@ -165,11 +182,12 @@ def search_serpapi(product_name: str, region: str, description: str, limit: int)
     logger.info("SEARCH COMPLETE — Total leads found: %d", len(all_leads))
     logger.info("-" * 60)
 
-    # --- Score every lead and build scatterplot data ---
-    scored_leads  = attach_scores(all_leads, product_name)
-    scatterplot   = build_scatterplot_data(scored_leads, product_name)
+    # --- Qualify every lead and build scatterplot data ---
+    qualified_leads = [qualify_lead(l, context, criteria) for l in all_leads]
+    qualified_leads.sort(key=lambda l: l["lead_score"], reverse=True)
 
-    scores        = [l["score"] for l in scored_leads]
+    scatterplot   = build_scatterplot_data(qualified_leads, product_name)
+    scores        = [l["lead_score"] for l in qualified_leads]
     score_summary = {
         "max":  max(scores) if scores else 0,
         "min":  min(scores) if scores else 0,
@@ -178,10 +196,13 @@ def search_serpapi(product_name: str, region: str, description: str, limit: int)
 
     return {
         "product_name":      product_name,
+        "product_or_service": context.get("product_or_service", product_name),
         "region":            region,
+        "location":          context.get("location", region),
+        "industry":          context.get("industry", description),
         "description":       description,
-        "total_leads_found": len(scored_leads),
+        "total_leads_found": len(qualified_leads),
         "score_summary":     score_summary,
-        "leads":             scored_leads,
+        "leads":             qualified_leads,
         "scatterplot_data":  scatterplot,
     }
